@@ -44,54 +44,107 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const fetchProfile = useCallback(async (userId: string, email?: string) => {
-    const { data: profile } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    try {
+      const { data: profile, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
 
-    if (profile && email) {
-      setUser(mapToAuthUser({ id: userId, email }, profile as Record<string, unknown>));
+      if (error) {
+        console.error('fetchProfile error:', error.message);
+        setUser(null);
+        return;
+      }
+
+      if (profile && email) {
+        setUser(mapToAuthUser({ id: userId, email }, profile as Record<string, unknown>));
+      } else {
+        setUser(null);
+      }
+    } catch (err) {
+      console.error('fetchProfile unexpected error:', err);
+      setUser(null);
     }
   }, [mapToAuthUser]);
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (session?.user) {
-        fetchProfile(session.user.id, session.user.email);
-      } else {
-        setUser(null);
-      }
-      setLoading(false);
-    });
+    let isMounted = true;
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        fetchProfile(session.user.id, session.user.email);
-      } else {
-        setLoading(false);
-      }
-    });
+    const initializeAuth = async () => {
+      try {
+        // 1. الحصول على الجلسة أولاً
+        const { data: { session } } = await supabase.auth.getSession();
 
-    return () => subscription.unsubscribe();
+        if (!isMounted) return;
+
+        if (session?.user) {
+          // 2. جلب البيانات فقط إذا كانت الجلسة موجودة
+          await fetchProfile(session.user.id, session.user.email);
+        }
+      } catch (err) {
+        console.error('initializeAuth error:', err);
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    initializeAuth();
+
+    // 3. الاستماع للتغييرات
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (!isMounted) return;
+
+        if (event === 'SIGNED_IN' && session?.user) {
+          setLoading(true);
+          await fetchProfile(session.user.id, session.user.email);
+          setLoading(false);
+        } else if (event === 'SIGNED_OUT') {
+          setUser(null);
+          setLoading(false);
+        } else if (event === 'TOKEN_REFRESHED' && session?.user) {
+          // لا حاجة لجلب البيانات مرة أخرى، فقط تحديث الجلسة
+        }
+      }
+    );
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
   }, [fetchProfile]);
 
   const login = useCallback(async (email: string, password: string): Promise<{ error: string | null }> => {
     try {
+      setLoading(true);
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) return { error: error.message };
-      if (data.user) {
-        await fetchProfile(data.user.id, data.user.email);
+
+      if (error) {
+        setLoading(false);
+        return { error: error.message };
       }
+
+      if (data.user) {
+        // onAuthStateChange سيتولى جلب البيانات تلقائياً
+        // لكن ننتظر قليلاً للتأكد
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
       return { error: null };
-    } catch {
+    } catch (err) {
+      console.error('Login error:', err);
       return { error: 'An unexpected error occurred' };
     }
-  }, [fetchProfile]);
+  }, []);
 
   const logout = useCallback(async () => {
+    setLoading(true);
     await supabase.auth.signOut();
     setUser(null);
+    setLoading(false);
   }, []);
 
   const isAuthenticated = !!user;
