@@ -43,6 +43,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  const refreshUserClaims = useCallback(async (userId: string) => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+
+      const response = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/auth-claims`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ user_id: userId }),
+        }
+      );
+
+      const result = await response.json();
+      if (result.success) {
+        await supabase.auth.refreshSession();
+      }
+    } catch (err) {
+      console.error('refreshUserClaims error:', err);
+    }
+  }, []);
+
   const fetchProfile = useCallback(async (userId: string, email?: string) => {
     try {
       const { data: profile, error } = await supabase
@@ -73,13 +99,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const initializeAuth = async () => {
       try {
-        // 1. الحصول على الجلسة أولاً
         const { data: { session } } = await supabase.auth.getSession();
 
         if (!isMounted) return;
 
         if (session?.user) {
-          // 2. جلب البيانات فقط إذا كانت الجلسة موجودة
           await fetchProfile(session.user.id, session.user.email);
         }
       } catch (err) {
@@ -93,20 +117,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     initializeAuth();
 
-    // 3. الاستماع للتغييرات
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
         if (!isMounted) return;
 
         if (event === 'SIGNED_IN' && session?.user) {
           setLoading(true);
+          await refreshUserClaims(session.user.id);
           await fetchProfile(session.user.id, session.user.email);
           setLoading(false);
         } else if (event === 'SIGNED_OUT') {
           setUser(null);
           setLoading(false);
         } else if (event === 'TOKEN_REFRESHED' && session?.user) {
-          // لا حاجة لجلب البيانات مرة أخرى، فقط تحديث الجلسة
+          // لا حاجة لجلب البيانات مرة أخرى
         }
       }
     );
@@ -115,7 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isMounted = false;
       subscription.unsubscribe();
     };
-  }, [fetchProfile]);
+  }, [fetchProfile, refreshUserClaims]);
 
   const login = useCallback(async (email: string, password: string): Promise<{ error: string | null }> => {
     try {
@@ -128,8 +152,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (data.user) {
-        // onAuthStateChange سيتولى جلب البيانات تلقائياً
-        // لكن ننتظر قليلاً للتأكد
+        await refreshUserClaims(data.user.id);
         await new Promise(resolve => setTimeout(resolve, 100));
       }
 
@@ -138,7 +161,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.error('Login error:', err);
       return { error: 'An unexpected error occurred' };
     }
-  }, []);
+  }, [refreshUserClaims]);
 
   const logout = useCallback(async () => {
     setLoading(true);
